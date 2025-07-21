@@ -68,7 +68,7 @@ def download_episode(index_select: int, scrape_serie: ScrapeSerieAnime, video_so
     if scrape_serie.is_series:
         mp4_path = os_manager.get_sanitize_path(os.path.join(site_constant.ANIME_FOLDER, scrape_serie.series_name))
     else:
-        mp4_path = os_manager.get_sanitize_path(os.path.join(site_constant.MOVIE_FOLDER, scrape_serie.series_name))
+        mp4_path = os_manager.get_sanitize_path(os.path.join(site_constant.ANIME_MOVIE_FOLDER, scrape_serie.series_name))
 
     # Create output folder
     os_manager.create_path(mp4_path)

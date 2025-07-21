@@ -23,6 +23,7 @@ from StreamingCommunity.Util.color import Colors
 from StreamingCommunity.Util.config_json import config_manager
 from StreamingCommunity.Util.os import internet_manager, os_manager
 from StreamingCommunity.TelegramHelp.telegram_bot import get_bot_instance
+from StreamingCommunity.Util.plex_naming import post_process_media_file
 
 
 # Logic class
@@ -161,6 +162,11 @@ def MP4_downloader(url: str, path: str, referer: str = None, headers_: dict = No
             os.rename(temp_path, path)
 
         if os.path.exists(path):
+            # Post-process file for Plex naming conventions
+            processed_path = post_process_media_file(path)
+            # Update path if it was changed
+            if processed_path != path:
+                path = processed_path
             console.print(Panel(
                 f"[bold green]Download completed{' (Partial)' if interrupt_handler.force_quit else ''}![/bold green]\n"
                 f"[cyan]File size: [bold red]{internet_manager.format_file_size(os.path.getsize(path))}[/bold red]\n"

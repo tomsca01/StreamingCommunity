@@ -57,6 +57,13 @@ class SiteConstant:
         return os.path.join(base_path, config_manager.get('OUT_FOLDER', 'anime_folder_name'))
     
     @property
+    def ANIME_MOVIE_FOLDER(self):
+        base_path = self.ROOT_PATH
+        if config_manager.get_bool("OUT_FOLDER", "add_siteName"):
+            base_path = os.path.join(base_path, self.SITE_NAME)
+        return os.path.join(base_path, config_manager.get('OUT_FOLDER', 'anime_movie_folder_name'))
+    
+    @property
     def COOKIE(self):
         try:
             return config_manager.get_dict('SITE_EXTRA', self.SITE_NAME)

@@ -1,6 +1,7 @@
 # 31.01.24
 
 import sys
+import os
 import logging
 import subprocess
 from typing import List, Dict, Tuple, Optional
@@ -249,21 +250,36 @@ def join_audios(video_path: str, audio_tracks: List[Dict[str, str]], out_path: s
     ffmpeg_cmd += [out_path, "-y"]
 
     # Run join
-    if DEBUG_MODE:
-        subprocess.run(ffmpeg_cmd, check=True)
-    else:
-
-        if get_use_large_bar():
-            capture_ffmpeg_real_time(ffmpeg_cmd, "[cyan]Join audio")
-            print()
-
+    try:
+        logging.info(f"Esecuzione FFmpeg per join_audios: {' '.join(ffmpeg_cmd)}")
+        
+        if DEBUG_MODE:
+            result = subprocess.run(ffmpeg_cmd, check=False, capture_output=True, text=True)
+            if result.returncode != 0:
+                logging.error(f"Errore FFmpeg (join_audios): {result.stderr}")
+                raise RuntimeError(f"FFmpeg error: {result.stderr}")
         else:
-            console.log(f"[purple]FFmpeg [white][[cyan]Join audio[white]] ...")
-            with suppress_output():
+            if get_use_large_bar():
                 capture_ffmpeg_real_time(ffmpeg_cmd, "[cyan]Join audio")
                 print()
-
-    return out_path
+            else:
+                console.log(f"[purple]FFmpeg [white][[cyan]Join audio[white]] ...")
+                with suppress_output():
+                    capture_ffmpeg_real_time(ffmpeg_cmd, "[cyan]Join audio")
+                    print()
+        
+        # Verifica che il file di output sia stato creato
+        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+            logging.error(f"FFmpeg non ha generato il file di output: {out_path}")
+            raise FileNotFoundError(f"Il file di output non esiste o è vuoto: {out_path}")
+            
+        logging.info(f"Join audio completato con successo: {out_path}")
+        return out_path
+        
+    except Exception as e:
+        logging.error(f"Errore durante join_audios: {str(e)}")
+        # Ritorna comunque il path anche in caso di errore, verrà gestito dal chiamante
+        return out_path
 
 
 def join_subtitle(video_path: str, subtitles_list: List[Dict[str, str]], out_path: str):
@@ -304,18 +320,33 @@ def join_subtitle(video_path: str, subtitles_list: List[Dict[str, str]], out_pat
     logging.info(f"FFmpeg command: {ffmpeg_cmd}")
 
     # Run join
-    if DEBUG_MODE:
-        subprocess.run(ffmpeg_cmd, check=True)
-
-    else:
-        if get_use_large_bar():
-            capture_ffmpeg_real_time(ffmpeg_cmd, "[cyan]Join subtitle")
-            print()
-
+    try:
+        logging.info(f"Esecuzione FFmpeg per join_subtitle: {' '.join(ffmpeg_cmd)}")
+        
+        if DEBUG_MODE:
+            result = subprocess.run(ffmpeg_cmd, check=False, capture_output=True, text=True)
+            if result.returncode != 0:
+                logging.error(f"Errore FFmpeg (join_subtitle): {result.stderr}")
+                raise RuntimeError(f"FFmpeg error: {result.stderr}")
         else:
-            console.log(f"[purple]FFmpeg [white][[cyan]Join subtitle[white]] ...")
-            with suppress_output():
+            if get_use_large_bar():
                 capture_ffmpeg_real_time(ffmpeg_cmd, "[cyan]Join subtitle")
                 print()
-
-    return out_path
+            else:
+                console.log(f"[purple]FFmpeg [white][[cyan]Join subtitle[white]] ...")
+                with suppress_output():
+                    capture_ffmpeg_real_time(ffmpeg_cmd, "[cyan]Join subtitle")
+                    print()
+        
+        # Verifica che il file di output sia stato creato
+        if not os.path.exists(out_path) or os.path.getsize(out_path) == 0:
+            logging.error(f"FFmpeg non ha generato il file di output sottotitoli: {out_path}")
+            raise FileNotFoundError(f"Il file di output sottotitoli non esiste o è vuoto: {out_path}")
+            
+        logging.info(f"Join subtitle completato con successo: {out_path}")
+        return out_path
+        
+    except Exception as e:
+        logging.error(f"Errore durante join_subtitle: {str(e)}")
+        # Ritorna comunque il path anche in caso di errore, verrà gestito dal chiamante
+        return out_path

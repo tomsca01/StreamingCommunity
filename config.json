@@ -11,12 +11,14 @@
         "validate_github_config": true
     },
     "OUT_FOLDER": {
-        "root_path": "Video",
-        "movie_folder_name": "Movie",
+        "root_path": "/mnt/e",
+        "movie_folder_name": "Film",
         "serie_folder_name": "Serie",
-        "anime_folder_name": "Anime",
-        "map_episode_name": "E%(episode)_%(episode_name)",
-        "add_siteName": false
+        "anime_folder_name": "Anime/Serie",
+        "anime_movie_folder_name": "Anime/Film",
+        "map_episode_name": "%(tv_name) - s%(season)e%(episode) - %(episode_name)",
+        "add_siteName": false,
+        "use_tmdb_ids": true
     },
     "QBIT_CONFIG": {
         "host": "192.168.1.51",

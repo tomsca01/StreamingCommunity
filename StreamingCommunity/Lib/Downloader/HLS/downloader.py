@@ -19,6 +19,7 @@ from StreamingCommunity.Util.config_json import config_manager
 from StreamingCommunity.Util.headers import get_userAgent
 from StreamingCommunity.Util.os import compute_sha1_hash, os_manager, internet_manager
 from StreamingCommunity.TelegramHelp.telegram_bot import get_bot_instance
+from StreamingCommunity.Util.plex_naming import post_process_media_file
 
 
 # Logic class
@@ -116,6 +117,26 @@ class PathManager:
         """Moves the final merged file to the desired output location."""
         if os.path.exists(self.output_path):
             os.remove(self.output_path)
+        
+        # Verifica che il file esista prima di spostarlo
+        if not os.path.exists(final_file):
+            # Se il file specificato non esiste, cerca alternative nella directory temporanea
+            possible_files = [
+                os.path.join(self.temp_dir, 'final.mp4'),
+                os.path.join(self.temp_dir, 'merged_audio.mp4'),
+                os.path.join(self.temp_dir, 'video.mp4')
+            ]
+            
+            for possible_file in possible_files:
+                if os.path.exists(possible_file):
+                    logging.info(f"File specificato {final_file} non trovato, utilizzo {possible_file}")
+                    final_file = possible_file
+                    break
+            else:
+                # Nessun file valido trovato
+                raise FileNotFoundError(f"Nessun file valido trovato nella directory temporanea {self.temp_dir}")
+        
+        logging.info(f"Spostamento del file {final_file} a {self.output_path}")
         shutil.move(final_file, self.output_path)
 
     def cleanup(self):
@@ -363,45 +384,194 @@ class MergeManager:
         1. If no audio/subs, just process video
         2. If audio exists, merge with video
         3. If subtitles exist, add them to the video
+        
+        Se il processo standard fallisce, usa un approccio di fallback che replica
+        lo script di riparazione per garantire che si generi sempre un file.
         """
         video_file = os.path.join(self.temp_dir, 'video', '0.ts')
         merged_file = video_file
+        
+        # Log l'inizio del processo di merge
+        logging.info(f"Inizio processo di merge nella directory: {self.temp_dir}")
+        logging.info(f"File video iniziale: {video_file}, esiste: {os.path.exists(video_file)}")
+        logging.info(f"Audio streams: {len(self.audio_streams)}, Sub streams: {len(self.sub_streams)}")
 
-        if not self.audio_streams and not self.sub_streams:
-            merged_file = join_video(
-                video_path=video_file,
-                out_path=os.path.join(self.temp_dir, 'video.mp4'),
-                codec=self.parser.codec
-            )
-
-        else:
-            if MERGE_AUDIO and self.audio_streams:
-                audio_tracks = [{
-                    'path': os.path.join(self.temp_dir, 'audio', a['language'], '0.ts'),
-                    'name': a['language']
-                } for a in self.audio_streams]
-
-                merged_audio_path = os.path.join(self.temp_dir, 'merged_audio.mp4')
-                merged_file = join_audios(
+        # Definizione dei percorsi dei file output
+        video_mp4_path = os.path.join(self.temp_dir, 'video.mp4')
+        merged_audio_path = os.path.join(self.temp_dir, 'merged_audio.mp4')
+        final_mp4_path = os.path.join(self.temp_dir, 'final.mp4')
+        final_sub_path = os.path.join(self.temp_dir, 'final_sub.mp4')
+        
+        try:
+            # Tentativo con il processo standard
+            if not self.audio_streams and not self.sub_streams:
+                merged_file = join_video(
                     video_path=video_file,
-                    audio_tracks=audio_tracks,
-                    out_path=merged_audio_path,
+                    out_path=video_mp4_path,
                     codec=self.parser.codec
                 )
+                logging.info(f"Creato file video senza audio/sottotitoli: {merged_file}, esiste: {os.path.exists(merged_file)}")
 
-            if MERGE_SUBTITLE and self.sub_streams:
-                sub_tracks = [{
-                    'path': os.path.join(self.temp_dir, 'subs', f"{s['language']}.vtt"),
-                    'language': s['language']
-                } for s in self.sub_streams]
+            else:
+                if MERGE_AUDIO and self.audio_streams:
+                    audio_tracks = [{
+                        'path': os.path.join(self.temp_dir, 'audio', a['language'], '0.ts'),
+                        'name': a['language']
+                    } for a in self.audio_streams]
+                    
+                    # Verifica esistenza file audio
+                    valid_audio_tracks = []
+                    for track in audio_tracks:
+                        if os.path.exists(track['path']):
+                            valid_audio_tracks.append(track)
+                            logging.info(f"Traccia audio valida: {track['path']}")
+                        else:
+                            logging.warning(f"Traccia audio non trovata: {track['path']}")
+                    
+                    if valid_audio_tracks:
+                        merged_file = join_audios(
+                            video_path=video_file,
+                            audio_tracks=valid_audio_tracks,
+                            out_path=merged_audio_path,
+                            codec=self.parser.codec
+                        )
+                        logging.info(f"Creato file con audio: {merged_file}, esiste: {os.path.exists(merged_file)}")
 
-                merged_subs_path = os.path.join(self.temp_dir, 'final.mp4')
-                merged_file = join_subtitle(
-                    video_path=merged_file,
-                    subtitles_list=sub_tracks,
-                    out_path=merged_subs_path
-                )
+                if MERGE_SUBTITLE and self.sub_streams:
+                    sub_tracks = []
+                    for s in self.sub_streams:
+                        sub_path = os.path.join(self.temp_dir, 'subs', f"{s['language']}.vtt")
+                        if os.path.exists(sub_path):
+                            sub_tracks.append({
+                                'path': sub_path,
+                                'language': s['language']
+                            })
+                            logging.info(f"Sottotitolo valido: {sub_path}")
+                        else:
+                            logging.warning(f"Sottotitolo non trovato: {sub_path}")
+                    
+                    if sub_tracks:
+                        merged_file = join_subtitle(
+                            video_path=merged_file,
+                            subtitles_list=sub_tracks,
+                            out_path=final_mp4_path
+                        )
+                        logging.info(f"Creato file finale con sottotitoli: {merged_file}, esiste: {os.path.exists(merged_file)}")
+            
+            # Verifica se il file è stato effettivamente creato
+            if not os.path.exists(merged_file) or os.path.getsize(merged_file) == 0:
+                raise FileNotFoundError(f"Il file {merged_file} non è stato creato o è vuoto")
+                
+        except Exception as e:
+            logging.error(f"Errore durante il merge standard: {str(e)}")
+            logging.info("Tentativo di riparazione con metodo alternativo...")
+            
+            # SISTEMA DI FALLBACK INTEGRATO DALLO SCRIPT DI RIPARAZIONE
+            try:
+                # Trova il file video
+                if os.path.exists(video_file):
+                    logging.info(f"File video trovato: {video_file}")
+                else:
+                    video_files = []
+                    video_dir = os.path.join(self.temp_dir, 'video')
+                    if os.path.exists(video_dir):
+                        video_files = [os.path.join(video_dir, f) for f in os.listdir(video_dir) 
+                                     if f.endswith('.ts') or f.endswith('.mp4')]
+                    
+                    if not video_files:
+                        raise FileNotFoundError("Nessun file video trovato")
+                    video_file = video_files[0]
+                    logging.info(f"Utilizzo il file video alternativo: {video_file}")
+                
+                # Trova il file audio
+                audio_file = None
+                audio_dirs = []
+                audio_dir = os.path.join(self.temp_dir, 'audio')
+                if os.path.exists(audio_dir):
+                    # Prima cerca nelle cartelle lingua
+                    audio_dirs = [d for d in os.listdir(audio_dir) if os.path.isdir(os.path.join(audio_dir, d))]
+                    
+                    for lang_dir in audio_dirs:
+                        lang_path = os.path.join(audio_dir, lang_dir)
+                        audio_files = [os.path.join(lang_path, f) for f in os.listdir(lang_path) 
+                                     if f.endswith('.ts') or f.endswith('.mp4')]
+                        if audio_files:
+                            audio_file = audio_files[0]
+                            break
+                
+                # Prepara il comando FFmpeg
+                import subprocess
+                ffmpeg_cmd = ['ffmpeg', '-i', video_file]
+                
+                if audio_file:
+                    logging.info(f"File audio trovato: {audio_file}")
+                    ffmpeg_cmd.extend(['-i', audio_file])
+                    ffmpeg_cmd.extend(['-map', '0:v', '-map', '1:a'])
+                else:
+                    logging.warning("Nessun file audio trovato, usando solo video")
+                    ffmpeg_cmd.extend(['-map', '0:v'])
+                    if ':a' in subprocess.check_output(['ffprobe', '-v', 'error', '-show_entries', 
+                                                   'stream=codec_type', '-of', 'default=nw=1:nk=1', video_file],
+                                                  text=True):
+                        ffmpeg_cmd.extend(['-map', '0:a'])
+                
+                ffmpeg_cmd.extend(['-c', 'copy', '-y', merged_audio_path])
+                logging.info(f"Esecuzione comando di riparazione: {' '.join(ffmpeg_cmd)}")
+                
+                # Esegui FFmpeg per unire video e audio
+                process = subprocess.run(ffmpeg_cmd, capture_output=True, text=True)
+                if process.returncode != 0:
+                    logging.error(f"Errore FFmpeg: {process.stderr}")
+                    # Se fallisce anche questo tentativo, usa solo il file video convertito
+                    fallback_cmd = ['ffmpeg', '-i', video_file, '-c', 'copy', '-y', video_mp4_path]
+                    subprocess.run(fallback_cmd, check=True)
+                    merged_file = video_mp4_path
+                else:
+                    merged_file = merged_audio_path
+                
+                # Aggiungi sottotitoli se disponibili
+                subs_dir = os.path.join(self.temp_dir, 'subs')
+                if os.path.exists(subs_dir) and os.listdir(subs_dir):
+                    sub_files = [f for f in os.listdir(subs_dir) if f.endswith('.vtt')]
+                    if sub_files:
+                        primary_sub = os.path.join(subs_dir, sub_files[0])
+                        logging.info(f"Sottotitolo trovato: {primary_sub}")
+                        
+                        sub_cmd = ['ffmpeg', '-i', merged_file, '-i', primary_sub, 
+                                  '-map', '0:v', '-map', '0:a', '-map', '1:s',
+                                  '-c', 'copy', '-c:s', 'mov_text', '-y', final_sub_path]
+                        try:
+                            subprocess.run(sub_cmd, check=True)
+                            merged_file = final_sub_path
+                            logging.info("Sottotitoli incorporati con successo")
+                        except Exception as sub_err:
+                            logging.error(f"Errore nell'incorporazione sottotitoli: {sub_err}")
+                
+                # Verifica finale
+                if not os.path.exists(merged_file) or os.path.getsize(merged_file) == 0:
+                    raise FileNotFoundError("Impossibile creare un file valido anche con il sistema di riparazione")
+                
+                logging.info(f"File riparato con successo: {merged_file}")
+                
+            except Exception as repair_err:
+                logging.error(f"Errore durante la riparazione: {str(repair_err)}")
+                # Se fallisce tutto, torna al file video originale come ultima spiaggia
+                if os.path.exists(video_file) and os.path.getsize(video_file) > 0:
+                    merged_file = video_file
+                    logging.warning(f"Utilizzo il file video originale come ultima spiaggia: {merged_file}")
+                else:
+                    raise FileNotFoundError("Impossibile trovare alcun file valido per il download")
 
+        # Log finale
+        logging.info(f"File finale dopo merge: {merged_file}, esiste: {os.path.exists(merged_file)}")
+        
+        # Elenca tutti i file nella directory temporanea
+        try:
+            files_in_temp = os.listdir(self.temp_dir)
+            logging.info(f"File presenti nella directory temporanea: {files_in_temp}")
+        except Exception as e:
+            logging.error(f"Errore nel listare i file nella directory temporanea: {e}")
+            
         return merged_file
 
 
@@ -487,6 +657,13 @@ class HLS_Downloader:
 
             final_file = self.merge_manager.merge()
             self.path_manager.move_final_file(final_file)
+            
+            # Post-process file for Plex naming conventions
+            processed_path = post_process_media_file(self.path_manager.output_path)
+            # Update output path if changed
+            if processed_path != self.path_manager.output_path:
+                self.path_manager.output_path = processed_path
+                
             self._print_summary()
             self.path_manager.cleanup()
 

@@ -65,7 +65,32 @@ def download_film(select_title: MediaItem) -> str:
 
         soup = BeautifulSoup(response.text, 'html.parser')
         iframes = soup.find_all('iframe')
+        
+        # Verifica se ci sono iframe trovati
+        if not iframes:
+            console.print(f"[red]Site: {site_constant.SITE_NAME}, error: No iframes found")
+            return None
+            
         mostraguarda = iframes[0]['src']
+        
+        # Gestisci URL relativi (che iniziano con //)
+        if mostraguarda.startswith('//'):
+            mostraguarda = f"https:{mostraguarda}"
+        # Gestisci percorsi assoluti (che iniziano con /)
+        elif mostraguarda.startswith('/'):
+            # Estrai il dominio dall'URL originale
+            domain_match = re.match(r'https?://([^/]+)', select_title.url)
+            if domain_match:
+                domain = domain_match.group(1)
+                mostraguarda = f"https://{domain}{mostraguarda}"
+            else:
+                # Usa un dominio predefinito se non possiamo estrarre il dominio
+                mostraguarda = f"https://mostraguarda.top{mostraguarda}"
+        # Gestisci URL relativi (che non hanno schema)
+        elif not mostraguarda.startswith('http://') and not mostraguarda.startswith('https://'):
+            mostraguarda = f"https://{mostraguarda}"
+            
+        console.print(f"[cyan]Mostraguarda URL: [yellow]{mostraguarda}")
     
     except Exception as e:
         console.print(f"[red]Site: {site_constant.SITE_NAME}, request error: {e}, get mostraguarda")
@@ -78,9 +103,36 @@ def download_film(select_title: MediaItem) -> str:
         response.raise_for_status()
 
         soup = BeautifulSoup(response.text, 'html.parser')
-        pattern = r'//supervideo\.[^/]+/[a-z]/[a-zA-Z0-9]+'
-        supervideo_match = re.search(pattern, response.text)
-        supervideo_url = 'https:' + supervideo_match.group(0)
+        
+        # Prova diversi pattern per supervideo
+        patterns = [
+            r'//supervideo\.[^/]+/[a-z]/[a-zA-Z0-9]+',  # Pattern originale
+            r'https?://supervideo\.[^/]+/[a-z]/[a-zA-Z0-9]+',  # Con protocollo
+            r'supervideo\.[^/]+/[a-z]/[a-zA-Z0-9]+',  # Senza //
+            r'//supervideo\.[^"\s]+',  # Pattern più generico
+            r'https?://supervideo\.[^"\s]+',  # Pattern generico con protocollo
+        ]
+        
+        supervideo_match = None
+        for pattern in patterns:
+            supervideo_match = re.search(pattern, response.text)
+            if supervideo_match:
+                console.print(f"[green]Found supervideo URL with pattern: {pattern}")
+                break
+        
+        if supervideo_match:
+            supervideo_url = supervideo_match.group(0)
+            # Aggiungi https: se necessario
+            if supervideo_url.startswith('//'):
+                supervideo_url = 'https:' + supervideo_url
+            elif not supervideo_url.startswith('http'):
+                supervideo_url = 'https://' + supervideo_url
+                
+            console.print(f"[cyan]Supervideo URL: [yellow]{supervideo_url}")
+        else:
+            console.print(f"[yellow]⚠️  Contenuto non disponibile")
+            console.print(f"Il film \"{select_title.name}\" non è attualmente disponibile per il download.")
+            return None
 
     except Exception as e:
         console.print(f"[red]Site: {site_constant.SITE_NAME}, request error: {e}, get supervideo URL")

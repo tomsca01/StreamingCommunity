@@ -1,0 +1,340 @@
+"""
+Plex media naming utility for StreamingCommunity.
+Ensures all downloaded files follow Plex naming conventions for optimal library integration.
+Incorporates TMDB IDs for better Plex matching when available.
+"""
+
+import os
+import re
+import logging
+from typing import Optional, Tuple, Dict, Any
+import datetime
+import time
+
+# Import TMDB functionality
+from StreamingCommunity.Lib.TMBD.tmdb import TheMovieDB
+from StreamingCommunity.Lib.TMBD.obj_tmbd import Json_film
+
+from StreamingCommunity.Util.config_json import config_manager
+from StreamingCommunity.Util.os import os_manager
+
+
+class PlexNaming:
+    """
+    Handles post-processing of downloaded files to follow Plex naming conventions.
+    """
+    def __init__(self):
+        """Initialize PlexNaming with configuration settings."""
+        # Mapped folders
+        self.film_folder = os.path.normpath(config_manager.get('OUT_FOLDER', 'movie_folder_name'))
+        self.serie_folder = os.path.normpath(config_manager.get('OUT_FOLDER', 'serie_folder_name'))
+        self.anime_folder = os.path.normpath(config_manager.get('OUT_FOLDER', 'anime_folder_name'))
+        self.anime_movie_folder = os.path.normpath(config_manager.get('OUT_FOLDER', 'anime_movie_folder_name'))
+        
+        # Root path
+        self.root_path = config_manager.get('OUT_FOLDER', 'root_path')
+        
+        # Whether to add site name to the path
+        self.add_site_name = config_manager.get_bool("OUT_FOLDER", "add_siteName")
+        
+        # Whether to use TMDB IDs in file names
+        # Verifica se la chiave esiste prima di ottenerla, altrimenti usa True come default
+        try:
+            self.use_tmdb_ids = config_manager.get_bool("OUT_FOLDER", "use_tmdb_ids")
+        except:
+            self.use_tmdb_ids = True
+        
+        # Initialize TheMovieDB API client
+        self.tmdb_api = TheMovieDB("a800ed6c93274fb857ea61bd9e7256c5")
+        
+        # Configure logger
+        self.logger = logging.getLogger("PlexNaming")
+        
+    def _remove_empty_folders(self, path):
+        """
+        Rimuove ricorsivamente le cartelle vuote a partire dal percorso specificato.
+        
+        Args:
+            path: Il percorso da cui iniziare la rimozione delle cartelle vuote
+        """
+        try:
+            # Controllo se il percorso esiste ancora (potrebbe essere già stato rimosso)
+            if not os.path.exists(path):
+                return
+                
+            # Se è un file, non fare nulla
+            if not os.path.isdir(path):
+                return
+                
+            # Prima controlla e pulisci tutte le sottocartelle
+            for item in os.listdir(path):
+                self._remove_empty_folders(os.path.join(path, item))
+                
+            # Ora controlla se questa cartella è vuota
+            if len(os.listdir(path)) == 0:
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Rimuovo cartella vuota: {path}\n")
+                os.rmdir(path)
+                
+        except Exception as e:
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"Errore rimuovendo cartella vuota {path}: {str(e)}\n")
+                
+    def _identify_media_type_via_tmdb(self, title: str, year: str = None) -> Dict[str, Any]:
+        """
+        Identifica il tipo di media (film, serie, anime) usando TMDB.
+        
+        Args:
+            title: Titolo del media
+            year: Anno di uscita, se disponibile
+            
+        Returns:
+            Dizionario con informazioni sul tipo di media
+        """
+        with open("/tmp/plex_naming_debug.log", "a") as f:
+            f.write(f"Identificazione tipo media via TMDB per: {title} ({year if year else 'anno sconosciuto'})\n")
+        
+        # Preparazione query di ricerca
+        search_title = re.sub(r'(?i)[-_\s](ita|eng|sub|dub)(?:bed)?(?:_|$|[-\s])', '', title)
+        search_title = search_title.replace('-', ' ').replace('_', ' ')
+        search_title = re.sub(r'\s+', ' ', search_title).strip()
+        
+        search_query = search_title
+        if year:
+            search_query += f" {year}"
+            
+        try:
+            # Prima prova a cercare come film
+            movie_data = self.tmdb_api._make_request("search/movie", {"query": search_query}).get("results", [])
+            
+            # Poi prova a cercare come serie TV
+            tv_data = self.tmdb_api._make_request("search/tv", {"query": search_query}).get("results", [])
+            
+            # Se non ci sono risultati, non possiamo determinare il tipo via TMDB
+            if not movie_data and not tv_data:
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Nessun risultato TMDB trovato per {search_query}\n")
+                return None
+                
+            # Determina se è film o serie in base ai risultati migliori
+            is_series = False
+            result = None
+            
+            # Se abbiamo risultati per entrambi, scegli quello con punteggio di popolarità più alto
+            if movie_data and tv_data:
+                movie_popularity = movie_data[0].get('popularity', 0)
+                tv_popularity = tv_data[0].get('popularity', 0)
+                
+                if tv_popularity > movie_popularity:
+                    is_series = True
+                    result = tv_data[0]
+                else:
+                    result = movie_data[0]
+            elif tv_data:
+                is_series = True
+                result = tv_data[0]
+            else:
+                result = movie_data[0]
+                
+            # Se abbiamo un risultato, controlliamo se è un anime giapponese
+            is_anime = False
+            tmdb_id = result['id']
+            
+            # Per le serie TV, ottieni dettagli completi
+            if is_series:
+                details = self.tmdb_api._make_request(f"tv/{tmdb_id}")
+                
+                # Controlla origine e generi
+                origin_country = details.get('origin_country', [])
+                genres = [genre['name'].lower() for genre in details.get('genres', [])]
+                
+                # Controlla anche le keywords per riferimenti all'anime
+                keywords = self.tmdb_api._make_request(f"tv/{tmdb_id}/keywords").get('results', [])
+                keyword_names = [k['name'].lower() for k in keywords]
+                
+                # Determina se è un anime
+                is_anime = ('JP' in origin_country or 'Japan' in origin_country or 
+                           'animation' in genres or 'anime' in genres or
+                           'anime' in keyword_names or 'japanese animation' in keyword_names)
+                
+            # Per i film, ottieni dettagli completi
+            else:
+                details = self.tmdb_api._make_request(f"movie/{tmdb_id}")
+                
+                # Controlla origine e generi
+                production_countries = [c['iso_3166_1'] for c in details.get('production_countries', [])]
+                genres = [genre['name'].lower() for genre in details.get('genres', [])]
+                
+                # Controlla anche le keywords per riferimenti all'anime
+                keywords = self.tmdb_api._make_request(f"movie/{tmdb_id}/keywords").get('keywords', [])
+                keyword_names = [k['name'].lower() for k in keywords]
+                
+                # Determina se è un anime
+                is_anime = ('JP' in production_countries or 
+                           'animation' in genres or 'anime' in genres or
+                           'anime' in keyword_names or 'japanese animation' in keyword_names)
+            
+            # Crea il tipo di media basato sulle informazioni TMDB
+            media_type = {}
+            if is_anime:
+                if is_series:
+                    media_type = {"type": "anime_series", "is_series": True, "is_anime": True, "tmdb_id": tmdb_id}
+                else:
+                    media_type = {"type": "anime_movie", "is_series": False, "is_anime": True, "tmdb_id": tmdb_id}
+            else:
+                if is_series:
+                    media_type = {"type": "series", "is_series": True, "is_anime": False, "tmdb_id": tmdb_id}
+                else:
+                    media_type = {"type": "movie", "is_series": False, "is_anime": False, "tmdb_id": tmdb_id}
+            
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"Tipo media determinato via TMDB: {media_type}\n")
+            
+            return media_type
+        
+        except Exception as e:
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"Errore durante identificazione TMDB: {str(e)}\n")
+            return None
+
+    def _determine_media_type(self, file_path: str) -> Optional[Dict[str, Any]]:
+        """
+        Determine media type based on file path.
+        
+        Returns a dict with:
+            type: 'movie', 'series', 'anime_movie', 'anime_series'
+            is_series: True if series, False if movie
+            is_anime: True if anime, False otherwise
+        """
+        normalized_path = os.path.normpath(file_path)
+        file_name = os.path.basename(normalized_path).lower()
+        
+        # Log per debug
+        with open("/tmp/plex_naming_debug.log", "a") as f:
+            f.write(f"Determinazione tipo media per: {file_path}\n")
+            f.write(f"Root path configurato: {self.root_path}\n")
+            f.write(f"File name: {file_name}\n")
+        
+        # Controllo diretto nel percorso per pattern comuni
+        path_lower = normalized_path.lower()
+        
+        # Verifica se è un anime in base al percorso o nome file
+        is_anime_path = ('/anime/' in path_lower or '/anime\\' in path_lower)
+        anime_keywords = ['anime', 'japan', 'jap', 'jpn']
+        
+        # Lista di serie anime note per distinguerle dai film
+        anime_series_names = ['demon slayer', 'one piece', 'naruto', 'attack on titan', 
+                             'boku no hero', 'my hero', 'dragon ball', 'hunter x hunter',
+                             'death note', 'sword art', 'fullmetal', 'jujutsu kaisen',
+                             'pokemon', 'digimon', 'bleach', 'chainsaw man']
+                             
+        # Lista di film anime noti
+        anime_movie_names = ['your name', 'weathering with you', 'spirited away', 
+                            'princess mononoke', 'howl moving castle', 'akira',
+                            'ghost in the shell', 'a silent voice', 'grave of the fireflies',
+                            'my neighbor totoro', 'promare', 'jujutsu kaisen 0']
+        
+        # Controlli per anime
+        is_anime_name = any(keyword in path_lower for keyword in anime_keywords)
+        is_anime_series = any(name.replace(' ', '') in file_name.replace('-', '').replace('_', '').replace(' ', '') 
+                              for name in anime_series_names)
+        is_anime_movie = any(name.replace(' ', '') in file_name.replace('-', '').replace('_', '').replace(' ', '') 
+                             for name in anime_movie_names)
+        
+        # Verifica se è una serie in base al nome o percorso
+        is_series_path = ('/serie/' in path_lower or '/series/' in path_lower or '/serie\\' in path_lower or '/series\\' in path_lower)
+        is_series_name = ('s01' in file_name or 's02' in file_name or 
+                         'stagione' in file_name or 'season' in file_name or
+                         '_ep_' in file_name or 'episodio' in file_name or
+                         'episode' in file_name)
+        
+        with open("/tmp/plex_naming_debug.log", "a") as f:
+            f.write(f"Analisi percorso: anime={is_anime_path}, serie={is_series_path}\n")
+            f.write(f"Analisi nome: anime={is_anime_name}, anime series={is_anime_series}, serie={is_series_name}\n")
+        
+        # Prima prova il metodo standard usando root_path
+        if self.root_path in normalized_path:
+            relative_path = normalized_path.replace(self.root_path, '').lstrip(os.sep)
+            parts = relative_path.split(os.sep)
+            
+            # Skip site name folder if present
+            if self.add_site_name and parts:
+                parts = parts[1:]
+            
+            if parts:
+                # Determine media type
+                if parts[0] == self.film_folder:
+                    return {"type": "movie", "is_series": False, "is_anime": False}
+                    
+                elif parts[0] == self.serie_folder:
+                    return {"type": "series", "is_series": True, "is_anime": False}
+                    
+                elif parts[0] == self.anime_folder:
+                    if len(parts) > 1:
+                        if parts[1] == "Film" or parts[1].lower() == "film":
+                            return {"type": "anime_movie", "is_series": False, "is_anime": True}
+                        elif parts[1] == "Serie" or parts[1].lower() == "serie":
+                            return {"type": "anime_series", "is_series": True, "is_anime": True}
+                    else:
+                        # Se è nella cartella anime ma non specifica film/serie, assumiamo serie
+                        return {"type": "anime_series", "is_series": True, "is_anime": True}
+        
+        # Prova a determinare il tipo tramite TMDB
+        # Estrai un titolo plausibile dal nome del file
+        possible_title = os.path.basename(file_path).lower()
+        possible_title = re.sub(r'\.(mp4|avi|mkv|mov)$', '', possible_title)  # Rimuovi estensione
+        possible_title = re.sub(r's\d+e\d+', '', possible_title)  # Rimuovi S01E01
+        possible_title = re.sub(r'(?i)[-_\s](ita|eng|sub|dub)(?:bed)?(?:_|$|[-\s])', '', possible_title)  # Rimuovi tag lingua
+        possible_title = possible_title.replace('.', ' ').replace('-', ' ').replace('_', ' ')
+        possible_title = re.sub(r'\s+', ' ', possible_title).strip()
+        
+        # Estrai anno se presente
+        year_match = re.search(r'(19|20)\d{2}', file_name)
+        year = year_match.group(0) if year_match else None
+        
+        # Cerca di ottenere il tipo da TMDB
+        tmdb_media_type = self._identify_media_type_via_tmdb(possible_title, year)
+        
+        # Se TMDB ha fornito un risultato valido, usalo
+        if tmdb_media_type:
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"Usando tipo media da TMDB: {tmdb_media_type}\n")
+            return tmdb_media_type
+            
+        # Fallback basato su analisi euristica del percorso e nome file
+        with open("/tmp/plex_naming_debug.log", "a") as f:
+            f.write(f"Usando metodo fallback per determinare tipo media\n")
+            
+        # Verifica se è un film anime noto (priorità massima)
+        if is_anime_movie:
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"Determinato come anime film (da lista film noti) tramite fallback\n")
+            return {"type": "anime_movie", "is_series": False, "is_anime": True}
+        
+        # Se è un anime (da percorso, nome o lista serie anime note)
+        if is_anime_path or is_anime_name or is_anime_series:
+            # Determina se è una serie o un film
+            if is_series_path or is_series_name:
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Determinato come anime serie tramite fallback\n")
+                return {"type": "anime_series", "is_series": True, "is_anime": True}
+            else:
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Determinato come anime film (da heuristica) tramite fallback\n")
+                return {"type": "anime_movie", "is_series": False, "is_anime": True}
+        
+        # Se non è un anime ma è una serie
+        elif is_series_path or is_series_name:
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"Determinato come serie normale tramite fallback\n")
+            return {"type": "series", "is_series": True, "is_anime": False}
+        
+        # Default a film normale se non ci sono altri indicatori
+        with open("/tmp/plex_naming_debug.log", "a") as f:
+            f.write(f"Non riuscito a determinare tipo media\n")
+            
+        return None
+
+    # [resto del codice rimane invariato]
+    
+    # [il resto del file rimane lo stesso...]
