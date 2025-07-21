@@ -642,13 +642,47 @@ class PlexNaming:
             with open("/tmp/plex_naming_debug.log", "a") as f:
                 f.write(f"Titolo serie estratto dal nome file: {extracted_title}\n")
     
-        # Se il titolo non è stato determinato, usa il nome della cartella
-        if not info["title"]:
+        # Se il titolo non è stato determinato, usa la cartella principale invece delle sottocartelle
+        if not info["title"] and media_type["is_series"]:
+            # Per le serie TV, cerca di usare la cartella principale invece di sottocartelle come "S1", "S2"
+            full_path_parts = file_path.split(os.sep)
+            
+            # Trova l'indice della cartella "Serie" o "Anime"
+            serie_index = -1
+            for i, part in enumerate(full_path_parts):
+                if part.lower() in ['serie', 'anime']:
+                    serie_index = i
+                    break
+            
+            # Se troviamo la cartella Serie/Anime, prendi la cartella successiva come titolo serie
+            if serie_index != -1 and serie_index + 1 < len(full_path_parts):
+                potential_title = full_path_parts[serie_index + 1]
+                # Evita cartelle come "S1", "S2", "Season 1", etc.
+                if not re.match(r'^[Ss]\d+$|^Season\s*\d+$', potential_title):
+                    info["title"] = potential_title
+                    with open("/tmp/plex_naming_debug.log", "a") as f:
+                        f.write(f"Titolo serie estratto dal percorso: {info['title']}\n")
+                else:
+                    # Se la cartella successiva è una stagione, prova quella prima
+                    if serie_index + 2 < len(full_path_parts):
+                        # Questo non dovrebbe succedere normalmente, ma è un fallback
+                        info["title"] = full_path_parts[serie_index + 1]
+                    else:
+                        info["title"] = parent_dir
+                    with open("/tmp/plex_naming_debug.log", "a") as f:
+                        f.write(f"Titolo fallback usando parent dir: {info['title']}\n")
+            else:
+                # Fallback al parent_dir se non troviamo la struttura attesa
+                info["title"] = parent_dir
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Titolo fallback usando nome cartella: {info['title']}\n")
+        
+        # Fallback per film se il titolo non è stato estratto
+        elif not info["title"] and not media_type["is_series"]:
             info["title"] = parent_dir
             with open("/tmp/plex_naming_debug.log", "a") as f:
-                f.write(f"Titolo fallback usando nome cartella: {parent_dir}\n")
-        
-                    
+                f.write(f"Titolo film fallback usando nome cartella: {info['title']}\n")
+                     
         # For movies, try to extract year
         if not media_type["is_series"]:
             # Look for year pattern in parent directory name
@@ -776,12 +810,22 @@ class PlexNaming:
                     with open("/tmp/plex_naming_debug.log", "a") as f:
                         f.write(f"Numero episodio: {ep_num}\n")
                         f.write(f"String episodio: {ep_str}\n")
+                        if info.get("episode_title"):
+                            f.write(f"Titolo episodio TMDB: {info['episode_title']}\n")
                     
-                    # Add TMDB ID for better Plex matching
-                    if self.use_tmdb_ids and info.get("tmdb_id"):
-                        filename = f"{title} - {ep_str} {{tmdb-{info['tmdb_id']}}}{ext}"
+                    # Costruisci il nome file con titolo episodio se disponibile
+                    if info.get("episode_title"):
+                        # Formato: "Serie - s01e01 - Titolo Episodio {tmdb-id}.ext"
+                        if self.use_tmdb_ids and info.get("tmdb_id"):
+                            filename = f"{title} - {ep_str} - {info['episode_title']} {{tmdb-{info['tmdb_id']}}}{ext}"
+                        else:
+                            filename = f"{title} - {ep_str} - {info['episode_title']}{ext}"
                     else:
-                        filename = f"{title} - {ep_str}{ext}"
+                        # Formato standard senza titolo episodio
+                        if self.use_tmdb_ids and info.get("tmdb_id"):
+                            filename = f"{title} - {ep_str} {{tmdb-{info['tmdb_id']}}}{ext}"
+                        else:
+                            filename = f"{title} - {ep_str}{ext}"
                         
                     final_path = os.path.join(season_folder, filename)
                     with open("/tmp/plex_naming_debug.log", "a") as f:
@@ -867,9 +911,15 @@ class PlexNaming:
                 with open("/tmp/plex_naming_debug.log", "a") as f:
                     f.write(f"TMDB ID trasferito da media_type: {media_type['tmdb_id']}\n")
             
-            # Try to enrich with TMDB metadata if enabled
+            # Try to enrich with TMDB metadata if enabled - USA IL NUOVO SISTEMA COMPLETO
             if self.use_tmdb_ids:
-                self._enrich_with_tmdb_metadata(file_info, media_type)
+                # Prima prova il nuovo sistema di ricerca completa TMDB
+                tmdb_success = self.search_and_enrich_with_tmdb(file_info, media_type)
+                if not tmdb_success:
+                    # Fallback al sistema vecchio se il nuovo fallisce
+                    with open("/tmp/plex_naming_debug.log", "a") as f:
+                        f.write(f"Fallback al sistema TMDB precedente\n")
+                    self._enrich_with_tmdb_metadata(file_info, media_type)
             
             # Generate new file path
             new_path = self._generate_plex_path(file_path, file_info, media_type)
@@ -900,6 +950,153 @@ class PlexNaming:
             self.logger.error(f"Error processing file {file_path}: {str(e)}")
             return file_path
             
+    def get_tv_details(self, tmdb_id: int) -> Dict[str, Any]:
+        """
+        Get TV show details from TMDB.
+        
+        Args:
+            tmdb_id: TMDB ID of the TV show
+            
+        Returns:
+            Dictionary with TV show details
+        """
+        try:
+            tv_details = self.tmdb_api._make_request(f"tv/{tmdb_id}")
+            return tv_details
+        except Exception as e:
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"Errore recupero dettagli TV {tmdb_id}: {str(e)}\n")
+            return None
+    
+    def get_episode_details(self, tmdb_id: int, season: int, episode: int) -> Dict[str, Any]:
+        """
+        Get episode details from TMDB.
+        
+        Args:
+            tmdb_id: TMDB ID of the TV show
+            season: Season number
+            episode: Episode number
+            
+        Returns:
+            Dictionary with episode details
+        """
+        try:
+            episode_details = self.tmdb_api._make_request(f"tv/{tmdb_id}/season/{season}/episode/{episode}")
+            return episode_details
+        except Exception as e:
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"Errore recupero dettagli episodio {tmdb_id} S{season}E{episode}: {str(e)}\n")
+            return None
+    
+    def search_and_enrich_with_tmdb(self, file_info: Dict[str, Any], media_type: Dict[str, Any]) -> bool:
+        """
+        Search for media on TMDB and enrich file_info with complete TMDB data.
+        
+        Args:
+            file_info: Dictionary to enrich with TMDB data
+            media_type: Media type information
+            
+        Returns:
+            True if successful, False otherwise
+        """
+        try:
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"\n=== RICERCA TMDB COMPLETA ===\n")
+                f.write(f"Titolo originale: {file_info.get('title')}\n")
+                f.write(f"Tipo media: {media_type['type']}\n")
+            
+            # Estrai il titolo pulito per la ricerca
+            search_title = file_info.get('title', '')
+            if not search_title:
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Nessun titolo disponibile per la ricerca\n")
+                return False
+            
+            # Pulisci il titolo per la ricerca
+            search_title = re.sub(r'[^\w\s]', ' ', search_title)
+            search_title = re.sub(r'\s+', ' ', search_title).strip()
+            
+            if media_type["is_series"]:
+                # Ricerca serie TV
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Ricerca serie TV: {search_title}\n")
+                
+                search_results = self.tmdb_api._make_request("search/tv", {"query": search_title})
+                results = search_results.get("results", [])
+                
+                if not results:
+                    with open("/tmp/plex_naming_debug.log", "a") as f:
+                        f.write(f"Nessuna serie TV trovata per: {search_title}\n")
+                    return False
+                
+                # Prendi il primo risultato (più rilevante)
+                tv_show = results[0]
+                tmdb_id = tv_show["id"]
+                
+                # Ottieni dettagli completi della serie
+                tv_details = self.get_tv_details(tmdb_id)
+                if not tv_details:
+                    return False
+                
+                # Arricchisci file_info con dati TMDB
+                file_info["tmdb_id"] = tmdb_id
+                file_info["title"] = tv_details["name"]
+                file_info["year"] = tv_details["first_air_date"][:4] if tv_details.get("first_air_date") else None
+                file_info["tmdb_original_name"] = tv_details.get("original_name")
+                file_info["tmdb_overview"] = tv_details.get("overview")
+                
+                # Se abbiamo informazioni su stagione ed episodio, ottieni dettagli episodio
+                if file_info.get("season") and file_info.get("episode"):
+                    episode_details = self.get_episode_details(tmdb_id, file_info["season"], file_info["episode"])
+                    if episode_details:
+                        file_info["episode_title"] = episode_details.get("name")
+                        file_info["episode_overview"] = episode_details.get("overview")
+                        file_info["episode_air_date"] = episode_details.get("air_date")
+                
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Serie TV trovata: {file_info['title']} ({file_info.get('year')}) [TMDB: {tmdb_id}]\n")
+                    if file_info.get("episode_title"):
+                        f.write(f"Episodio: S{file_info.get('season', '?')}E{file_info.get('episode', '?')} - {file_info['episode_title']}\n")
+                
+            else:
+                # Ricerca film
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Ricerca film: {search_title}\n")
+                
+                search_results = self.tmdb_api._make_request("search/movie", {"query": search_title})
+                results = search_results.get("results", [])
+                
+                if not results:
+                    with open("/tmp/plex_naming_debug.log", "a") as f:
+                        f.write(f"Nessun film trovato per: {search_title}\n")
+                    return False
+                
+                # Prendi il primo risultato (più rilevante)
+                movie = results[0]
+                tmdb_id = movie["id"]
+                
+                # Ottieni dettagli completi del film
+                movie_details = self.tmdb_api.get_movie_details(tmdb_id)
+                if not movie_details:
+                    return False
+                
+                # Arricchisci file_info con dati TMDB
+                file_info["tmdb_id"] = tmdb_id
+                file_info["title"] = movie_details.title
+                file_info["year"] = movie_details.release_date[:4] if movie_details.release_date else None
+                file_info["tmdb_original_title"] = movie_details.original_title
+                file_info["tmdb_overview"] = movie_details.overview
+                
+                with open("/tmp/plex_naming_debug.log", "a") as f:
+                    f.write(f"Film trovato: {file_info['title']} ({file_info.get('year')}) [TMDB: {tmdb_id}]\n")
+            
+            return True
+            
+        except Exception as e:
+            with open("/tmp/plex_naming_debug.log", "a") as f:
+                f.write(f"Errore nella ricerca TMDB: {str(e)}\n")
+            return False
+    
     def _enrich_with_tmdb_metadata(self, file_info: Dict[str, Any], media_type: Dict[str, Any]) -> None:
         """
         Try to enrich the file info with TMDB metadata, including IDs.
